@@ -1,0 +1,90 @@
+// PLEASE MODIFY THIS FILE TO IMPLEMENT YOUR SOLUTION
+
+// Block Parition APSP Implementation:
+
+#include <cstdio>
+
+#include "apsp.h"
+
+constexpr int BS = 32;
+
+namespace {
+__global__ void kernel_center(int n, int t, int k, int *graph) {
+    auto i = t + threadIdx.y;
+    auto j = t + threadIdx.x;
+    if (i < n && j < n) {
+        graph[i * n + j] = min(graph[i * n + j], graph[i * n + k] + graph[k * n + j]);
+    }
+}
+
+__global__ void kernel_hori(int n, int t, int k, int *graph) {
+    auto i = t + threadIdx.y;
+    auto j = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((j < t || j >= t + BS) && i < n && j < n) {
+        graph[i * n + j] = min(graph[i * n + j], graph[i * n + k] + graph[k * n + j]);
+    }
+}
+
+__global__ void kernel_vert(int n, int t, int k, int *graph) {
+    auto i = blockIdx.x * blockDim.x + threadIdx.y;
+    auto j = t + threadIdx.x;
+    if ((i < t || i >= t + BS) && i < n && j < n) {
+        graph[i * n + j] = min(graph[i * n + j], graph[i * n + k] + graph[k * n + j]);
+    }
+}
+
+__global__ void kernel_other(int n, int t, int *graph) {
+    __shared__ int a[BS][BS];
+    __shared__ int b[BS][BS];
+
+    auto i = blockIdx.y * blockDim.y + threadIdx.y;
+    auto j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && t + threadIdx.x < n) {
+        a[threadIdx.y][threadIdx.x] = graph[i * n + t + threadIdx.x]; // 垂直十字
+    }
+    if (j < n && t + threadIdx.y < n) {
+        b[threadIdx.y][threadIdx.x] = graph[(t + threadIdx.y) * n + j]; // 水平十字
+    }
+    __syncthreads();
+
+    if ((i < t || i >= t + BS) && (j < t || j >= t + BS) && i < n && j < n) {
+        int tmp = graph[i * n + j];
+        int maxk = min(BS, n - t);
+        for (int k = 0; k < maxk; k++) {
+            int x = a[threadIdx.y][k] + b[k][threadIdx.x];
+            if (x < tmp) tmp = x;
+        }
+        graph[i * n + j] = tmp;
+    }
+}
+
+}
+
+void apsp(int n, /* device */ int *graph) {
+    for (int t = 0; t < n; t += BS) {
+        // 阶段一：中心块
+        for (int k = t; k < t + BS && k < n; k++) {
+            dim3 thr(BS, BS);
+            kernel_center<<<1, thr>>>(n, t, k, graph);
+        }
+
+        // 阶段二：十字块
+        for (int k = t; k < t + BS && k < n; k++) {
+            // 十字块水平方向
+            dim3 thr(BS, BS);
+            dim3 blk((n - 1) / BS + 1);
+            kernel_hori<<<blk, thr>>>(n, t, k, graph);
+
+            // 十字块垂直方向
+            thr = dim3(BS, BS);
+            blk = dim3((n - 1) / BS + 1);
+            kernel_vert<<<blk, thr>>>(n, t, k, graph);
+        }
+
+        // 阶段三：其他块
+        dim3 thr(BS, BS);
+        dim3 blk((n - 1) / BS + 1, (n - 1) / BS + 1);
+        kernel_other<<<blk, thr>>>(n, t, graph);
+    }
+}
+
